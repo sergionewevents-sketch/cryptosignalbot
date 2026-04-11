@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
 import requests
 import logging
@@ -434,4 +436,21 @@ def main():
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
+    t = threading.Thread(target=start_health_server, daemon=True)
+    t.start()
     main()
+
+# ============================================================
+# SERVIDOR HTTP MÍNIMO (requerido por Fly.io health checks)
+# ============================================================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # silenciar logs del servidor HTTP
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
+    server.serve_forever()
