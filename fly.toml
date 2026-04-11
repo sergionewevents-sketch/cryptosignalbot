@@ -3,6 +3,9 @@ primary_region = "mad"
 
 [build]
 
+[processes]
+  app = "python main.py"
+
 [env]
   POLL_INTERVAL = "10"
   DAILY_REPORT_HOUR = "23"
