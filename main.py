@@ -84,6 +84,13 @@ def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
             else:
                 log.error(f"KuCoin error {symbol}: {data.get('msg')}")
                 return []
+        elif r.status_code == 429:
+            log.warning(f"KuCoin rate limit {symbol}, esperando 5s...")
+            time.sleep(5)
+            return []
+        elif r.status_code == 400:
+            log.warning(f"KuCoin par no disponible: {symbol}")
+            return []
         else:
             log.error(f"KuCoin HTTP error {symbol}: {r.status_code}")
             return []
@@ -365,7 +372,7 @@ def main():
                 })
 
                 log.info(f"Señal: {symbol} {signal['direction']} | {signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom")
-                time.sleep(0.3)
+                time.sleep(1.0)
 
             resolve_pending_signals()
             pending_signals[:] = [s for s in pending_signals if not s["resolved"]]
