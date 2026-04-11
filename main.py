@@ -20,6 +20,16 @@ CLOSE_MINUTES       = int(os.environ.get("CLOSE_MINUTES", "5"))
 POLL_INTERVAL       = int(os.environ.get("POLL_INTERVAL", "10"))
 DAILY_REPORT_HOUR   = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
 
+# Filtro de horario (hora Madrid CEST = UTC+2)
+TRADING_HOUR_START  = int(os.environ.get("TRADING_HOUR_START", "9"))   # 9:00 Madrid
+TRADING_HOUR_END    = int(os.environ.get("TRADING_HOUR_END", "20"))    # 20:00 Madrid
+
+# Filtro RSI
+RSI_PERIOD          = int(os.environ.get("RSI_PERIOD", "14"))
+RSI_LONG_MAX        = int(os.environ.get("RSI_LONG_MAX", "65"))   # LONG solo si RSI < 65
+RSI_SHORT_MIN       = int(os.environ.get("RSI_SHORT_MIN", "35"))  # SHORT solo si RSI > 35
+RSI_OVERBOUGHT      = int(os.environ.get("RSI_OVERBOUGHT", "68")) # zona sobrecompra
+
 # Pares de Quantfury en KuCoin (formato BASE-USDT)
 SYMBOLS = [
     "BTC-USDT", "SOL-USDT", "AAVE-USDT", "LINK-USDT", "DOT-USDT",
@@ -151,14 +161,57 @@ def get_orderbook_pressure(symbol: str):
         return 0.5, 0.5
 
 # ============================================================
+# FILTRO DE HORARIO
+# ============================================================
+def is_trading_hours() -> bool:
+    """Devuelve True si estamos en horario de trading (hora Madrid)."""
+    now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
+    return TRADING_HOUR_START <= now_madrid.hour < TRADING_HOUR_END
+
+# ============================================================
+# RSI
+# ============================================================
+def calculate_rsi(klines: list, period: int = 14) -> float:
+    """
+    Calcula el RSI de las últimas `period` velas.
+    klines: lista de dicts con clave 'close', orden cronológico ascendente.
+    """
+    if len(klines) < period + 1:
+        return 50.0  # valor neutro si no hay suficientes datos
+
+    closes = [k["close"] for k in klines[-(period + 1):]]
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+# ============================================================
 # LÓGICA DE DETECCIÓN
 # ============================================================
 def check_symbol(symbol: str):
     """
-    1. Detecta pico de volumen vs media histórica
-    2. Si hay pico, consulta orderbook para dirección
+    1. Filtro de horario — no opera de 20:00 a 09:00 hora Madrid
+    2. Detecta pico de volumen vs media histórica
+    3. Consulta orderbook para dirección
+    4. Filtro RSI — LONG solo si RSI < 65, SHORT solo si RSI > 35
     """
-    klines_raw = get_klines(symbol, limit=MA_PERIOD + 2)
+    # Filtro horario
+    if not is_trading_hours():
+        return None
+
+    # Necesitamos RSI_PERIOD + MA_PERIOD + 2 velas para tener suficientes datos
+    limit = max(RSI_PERIOD + 2, MA_PERIOD + 2)
+    klines_raw = get_klines(symbol, limit=limit)
     if len(klines_raw) < MA_PERIOD + 1:
         return None
 
@@ -166,6 +219,7 @@ def check_symbol(symbol: str):
     current = klines[-1]
     history = klines[:-1]
 
+    # Volumen anómalo
     avg_volume = sum(k["volume"] for k in history[-MA_PERIOD:]) / MA_PERIOD
     if avg_volume == 0:
         return None
@@ -186,12 +240,25 @@ def check_symbol(symbol: str):
     else:
         return None
 
+    # Filtro RSI
+    rsi = calculate_rsi(klines, period=RSI_PERIOD)
+    if direction == "LONG" and rsi >= RSI_LONG_MAX:
+        log.info(f"Señal {symbol} LONG descartada por RSI alto: {rsi}")
+        return None
+    if direction == "SHORT" and rsi <= RSI_SHORT_MIN:
+        log.info(f"Señal {symbol} SHORT descartada por RSI bajo: {rsi}")
+        return None
+    if rsi >= RSI_OVERBOUGHT and direction == "LONG":
+        log.info(f"Señal {symbol} LONG descartada por sobrecompra: RSI {rsi}")
+        return None
+
     return {
         "symbol":        symbol,
         "direction":     direction,
         "price":         current["close"],
         "vol_ratio":     round(vol_ratio, 2),
         "dominance_pct": dominance_pct,
+        "rsi":           rsi,
     }
 
 def is_in_cooldown(symbol: str) -> bool:
@@ -215,6 +282,7 @@ def format_signal(signal: dict) -> str:
         f"💰 Precio: <b>${signal['price']:,.4f}</b>\n"
         f"📊 Volumen: <b>{signal['vol_ratio']}x</b> sobre la media\n"
         f"{dom_label}: <b>{signal['dominance_pct']}%</b>\n"
+        f"📉 RSI: <b>{signal.get('rsi', '-')}</b>\n"
         f"⏱️ Cierre estimado en {CLOSE_MINUTES} min\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
@@ -351,6 +419,13 @@ def main():
             cycle += 1
             signals_this_cycle = 0
             signaled_this_cycle = set()  # evita duplicados en el mismo ciclo
+
+            if not is_trading_hours():
+                if cycle % 60 == 0:
+                    now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
+                    log.info(f"Fuera de horario ({now_madrid.strftime('%H:%M')} Madrid) — bot en pausa")
+                time.sleep(POLL_INTERVAL)
+                continue
 
             for symbol in SYMBOLS:
                 if is_in_cooldown(symbol):
