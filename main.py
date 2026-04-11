@@ -16,9 +16,11 @@ VOLUME_MULTIPLIER   = float(os.environ.get("VOLUME_MULTIPLIER", "3.0"))
 DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.68"))
 COOLDOWN_MINUTES    = int(os.environ.get("COOLDOWN_MINUTES", "30"))
 MA_PERIOD           = int(os.environ.get("MA_PERIOD", "20"))
-CLOSE_MINUTES       = int(os.environ.get("CLOSE_MINUTES", "5"))
 POLL_INTERVAL       = int(os.environ.get("POLL_INTERVAL", "10"))
 DAILY_REPORT_HOUR   = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
+
+# Tiempos de cierre múltiples
+CLOSE_TIMES = [5, 7, 9]  # minutos
 
 # Filtro de horario (hora Madrid CEST = UTC+2)
 TRADING_HOUR_START  = int(os.environ.get("TRADING_HOUR_START", "9"))   # 9:00 Madrid
@@ -53,11 +55,16 @@ log = logging.getLogger(__name__)
 last_signal_time = {}
 pending_signals  = []
 
-daily_stats = {
-    "total": 0, "win": 0, "loss": 0, "pnl": 0.0,
-    "best_signal": None, "worst_signal": None,
-}
-last_daily_report = None
+def make_stats():
+    return {
+        t: {"total": 0, "win": 0, "loss": 0, "pnl": 0.0}
+        for t in CLOSE_TIMES
+    }
+
+daily_stats  = make_stats()
+weekly_stats = make_stats()
+last_daily_report  = None
+last_weekly_report = None
 
 # ============================================================
 # TELEGRAM
@@ -341,7 +348,7 @@ def resolve_pending_signals():
         if signal["resolved"]:
             continue
         elapsed = (now - signal["entry_time"]).total_seconds()
-        if elapsed < CLOSE_MINUTES * 60:
+        if elapsed < signal["close_min"] * 60:
             continue
 
         close_price = get_current_price(signal["symbol"])
@@ -353,25 +360,24 @@ def resolve_pending_signals():
         pct_change = ((close_price - entry) / entry) * 100
         pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
         pnl_eur = round(pnl_pct / 100, 4)
+        t = signal["close_min"]
 
-        daily_stats["total"] += 1
-        daily_stats["pnl"] = round(daily_stats["pnl"] + pnl_eur, 4)
+        daily_stats[t]["total"] += 1
+        daily_stats[t]["pnl"] = round(daily_stats[t]["pnl"] + pnl_eur, 4)
+        weekly_stats[t]["total"] += 1
+        weekly_stats[t]["pnl"] = round(weekly_stats[t]["pnl"] + pnl_eur, 4)
         if pnl_eur > 0:
-            daily_stats["win"] += 1
+            daily_stats[t]["win"] += 1
+            weekly_stats[t]["win"] += 1
         else:
-            daily_stats["loss"] += 1
-
-        sig_result = {"symbol": signal["symbol"], "direction": signal["direction"], "pnl": pnl_eur}
-        if daily_stats["best_signal"] is None or pnl_eur > daily_stats["best_signal"]["pnl"]:
-            daily_stats["best_signal"] = sig_result
-        if daily_stats["worst_signal"] is None or pnl_eur < daily_stats["worst_signal"]["pnl"]:
-            daily_stats["worst_signal"] = sig_result
+            daily_stats[t]["loss"] += 1
+            weekly_stats[t]["loss"] += 1
 
         send_telegram(format_resolution(signal, close_price))
-        log.info(f"Señal resuelta: {signal['symbol']} {signal['direction']} → {pnl_eur:+.4f}€")
+        log.info(f"Cierre {t}min: {signal['symbol']} {signal['direction']} → {pnl_eur:+.4f}€")
 
 # ============================================================
-# RESUMEN DIARIO
+# RESUMEN DIARIO Y SEMANAL
 # ============================================================
 def check_daily_report():
     global last_daily_report, daily_stats
@@ -384,8 +390,23 @@ def check_daily_report():
     last_daily_report = today
     send_telegram(format_daily_report())
     log.info("Resumen diario enviado")
-    daily_stats.update({"total": 0, "win": 0, "loss": 0, "pnl": 0.0,
-                        "best_signal": None, "worst_signal": None})
+    daily_stats.update(make_stats())
+
+def check_weekly_report():
+    global last_weekly_report, weekly_stats
+    now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
+    # Enviar el domingo a las 23:00
+    if now_madrid.weekday() != 6:
+        return
+    if now_madrid.hour != DAILY_REPORT_HOUR:
+        return
+    today = now_madrid.date()
+    if last_weekly_report == today:
+        return
+    last_weekly_report = today
+    send_telegram(format_weekly_report())
+    log.info("Resumen semanal enviado")
+    weekly_stats.update(make_stats())
 
 # ============================================================
 # SERVIDOR HTTP (requerido por Fly.io)
@@ -442,13 +463,16 @@ def main():
                 signals_this_cycle += 1
                 send_telegram(format_signal(signal))
 
-                pending_signals.append({
-                    "symbol":      symbol,
-                    "direction":   signal["direction"],
-                    "entry_price": signal["price"],
-                    "entry_time":  datetime.now(timezone.utc),
-                    "resolved":    False,
-                })
+                now = datetime.now(timezone.utc)
+                for close_min in CLOSE_TIMES:
+                    pending_signals.append({
+                        "symbol":      symbol,
+                        "direction":   signal["direction"],
+                        "entry_price": signal["price"],
+                        "entry_time":  now,
+                        "close_min":   close_min,
+                        "resolved":    False,
+                    })
 
                 log.info(f"Señal: {symbol} {signal['direction']} | {signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom")
                 time.sleep(1.0)
@@ -456,6 +480,7 @@ def main():
             resolve_pending_signals()
             pending_signals[:] = [s for s in pending_signals if not s["resolved"]]
             check_daily_report()
+            check_weekly_report()
 
             if signals_this_cycle > 0:
                 log.info(f"Ciclo {cycle} — {signals_this_cycle} señal(es)")
