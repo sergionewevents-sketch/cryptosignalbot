@@ -13,7 +13,7 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
 
 VOLUME_MULTIPLIER   = float(os.environ.get("VOLUME_MULTIPLIER", "3.0"))
-DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.75"))
+DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.68"))
 COOLDOWN_MINUTES    = int(os.environ.get("COOLDOWN_MINUTES", "30"))
 MA_PERIOD           = int(os.environ.get("MA_PERIOD", "20"))
 CLOSE_MINUTES       = int(os.environ.get("CLOSE_MINUTES", "5"))
@@ -350,9 +350,12 @@ def main():
         try:
             cycle += 1
             signals_this_cycle = 0
+            signaled_this_cycle = set()  # evita duplicados en el mismo ciclo
 
             for symbol in SYMBOLS:
                 if is_in_cooldown(symbol):
+                    continue
+                if symbol in signaled_this_cycle:
                     continue
 
                 signal = check_symbol(symbol)
@@ -360,6 +363,7 @@ def main():
                     continue
 
                 last_signal_time[symbol] = datetime.now(timezone.utc)
+                signaled_this_cycle.add(symbol)
                 signals_this_cycle += 1
                 send_telegram(format_signal(signal))
 
