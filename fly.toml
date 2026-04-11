@@ -12,8 +12,17 @@ primary_region = "mad"
   VOLUME_MULTIPLIER = "3.0"
   DOMINANCE_THRESHOLD = "0.75"
   COOLDOWN_MINUTES = "30"
+  TELEGRAM_TOKEN = "8703786104:AAEi7dIul2ENjZvAotEqFPdpR9Mk7WUp2K0"
+  TELEGRAM_CHAT_ID = "364177709"
 
 [[vm]]
   memory = "256mb"
   cpu_kind = "shared"
   cpus = 1
+
+[checks]
+  [checks.alive]
+    type = "tcp"
+    port = 8080
+    interval = "30s"
+    timeout = "5s"
