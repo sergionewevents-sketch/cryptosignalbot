@@ -389,7 +389,7 @@ def start_health_server():
 # BUCLE PRINCIPAL
 # ============================================================
 def main():
-    log.info("🚀 CryptoSignalBot arrancado!")
+    log.info("🚀 CryptoSignalBot V2 arrancado!")
     send_telegram(
         "🚀 <b>CryptoSignalBot activado</b>\n"
         f"Monitorizando {len(SYMBOLS)} pares cada {POLL_INTERVAL}s\n"
