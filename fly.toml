@@ -1,28 +1,27 @@
-app = "cryptosignalbot"
-primary_region = "mad"
+# fly.toml app configuration file generated for cryptosignalbot on 2026-04-11T18:52:26Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'cryptosignalbot'
+primary_region = 'iad'
 
 [build]
-
-[processes]
-  app = "python main.py"
+  builder = 'paketobuildpacks/builder:base'
 
 [env]
-  POLL_INTERVAL = "10"
-  DAILY_REPORT_HOUR = "23"
-  VOLUME_MULTIPLIER = "3.0"
-  DOMINANCE_THRESHOLD = "0.75"
-  COOLDOWN_MINUTES = "30"
-  TELEGRAM_TOKEN = "8703786104:AAEi7dIul2ENjZvAotEqFPdpR9Mk7WUp2K0"
-  TELEGRAM_CHAT_ID = "364177709"
+  PORT = '8080'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[vm]]
-  memory = "256mb"
-  cpu_kind = "shared"
+  memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
-
-[checks]
-  [checks.alive]
-    type = "tcp"
-    port = 8080
-    interval = "30s"
-    timeout = "5s"
+  memory_mb = 1024
