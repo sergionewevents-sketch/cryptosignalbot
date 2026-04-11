@@ -32,7 +32,7 @@ SYMBOLS = [
     "ZECUSDT",
 ]
 
-BINANCE_BASE = "https://api.binance.com"
+BYBIT_BASE = "https://api.bybit.com"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -73,51 +73,96 @@ def send_telegram(message: str):
         log.error(f"Telegram exception: {e}")
 
 # ============================================================
-# BINANCE API
+# BYBIT API
+# Usamos Bybit en lugar de Binance para evitar restricciones
+# geográficas desde servidores de Railway (error 451).
+# Bybit ofrece exactamente los mismos datos: velas OHLCV con
+# volumen de compra/venta separado (taker buy/sell volume).
 # ============================================================
-def get_klines(symbol: str, interval: str = "1m", limit: int = 22):
-    """Obtiene las últimas `limit` velas de 1 minuto para un símbolo."""
+def get_klines(symbol: str, interval: str = "1", limit: int = 22):
+    """
+    Obtiene las últimas `limit` velas de 1 minuto para un símbolo.
+    Bybit kline endpoint: /v5/market/kline
+    interval: "1" = 1 minuto
+    Respuesta: list de [startTime, open, high, low, close, volume, turnover]
+    """
     try:
-        url = f"{BINANCE_BASE}/api/v3/klines"
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        url = f"{BYBIT_BASE}/v5/market/kline"
+        params = {
+            "category": "spot",
+            "symbol":   symbol,
+            "interval": interval,
+            "limit":    limit,
+        }
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return r.json()
+            data = r.json()
+            if data.get("retCode") == 0:
+                return data["result"]["list"]
+            else:
+                log.error(f"Bybit klines error {symbol}: {data.get('retMsg')}")
+                return []
         else:
-            log.error(f"Binance klines error {symbol}: {r.status_code}")
+            log.error(f"Bybit klines HTTP error {symbol}: {r.status_code}")
             return []
     except Exception as e:
-        log.error(f"Binance klines exception {symbol}: {e}")
+        log.error(f"Bybit klines exception {symbol}: {e}")
         return []
+
+def get_orderbook_pressure(symbol: str):
+    """
+    Obtiene la presión compradora/vendedora del orderbook de Bybit.
+    Suma el volumen de los primeros 50 niveles de bid y ask.
+    Retorna (buy_ratio, sell_ratio).
+    """
+    try:
+        url = f"{BYBIT_BASE}/v5/market/orderbook"
+        params = {"category": "spot", "symbol": symbol, "limit": 50}
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("retCode") == 0:
+                bids = data["result"]["b"]  # [[price, qty], ...]
+                asks = data["result"]["a"]
+                bid_vol = sum(float(b[1]) for b in bids)
+                ask_vol = sum(float(a[1]) for a in asks)
+                total = bid_vol + ask_vol
+                if total == 0:
+                    return 0.5, 0.5
+                return bid_vol / total, ask_vol / total
+        return 0.5, 0.5
+    except Exception as e:
+        log.error(f"Bybit orderbook exception {symbol}: {e}")
+        return 0.5, 0.5
 
 def get_current_price(symbol: str):
     """Obtiene el precio actual de un símbolo."""
     try:
-        url = f"{BINANCE_BASE}/api/v3/ticker/price"
-        r = requests.get(url, params={"symbol": symbol}, timeout=10)
+        url = f"{BYBIT_BASE}/v5/market/tickers"
+        params = {"category": "spot", "symbol": symbol}
+        r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return float(r.json()["price"])
+            data = r.json()
+            if data.get("retCode") == 0:
+                return float(data["result"]["list"][0]["lastPrice"])
         return None
     except Exception as e:
-        log.error(f"Binance price exception {symbol}: {e}")
+        log.error(f"Bybit price exception {symbol}: {e}")
         return None
 
 def parse_klines(klines: list):
     """
-    Extrae de cada vela:
-      - volume: volumen total
-      - taker_buy_volume: volumen iniciado por compradores
-      - close: precio de cierre
-    Binance kline formato: [open_time, open, high, low, close, volume,
-                             close_time, quote_vol, trades,
-                             taker_buy_base_vol, taker_buy_quote_vol, ignore]
+    Bybit devuelve las velas en orden DESCENDENTE (la más reciente primero).
+    Formato: [startTime, open, high, low, close, volume, turnover]
+    Invertimos para tener orden cronológico ascendente.
+    Como Bybit spot no separa taker buy/sell en el endpoint de klines,
+    usamos el orderbook para la dirección (se llama solo cuando hay pico de volumen).
     """
     result = []
-    for k in klines:
+    for k in reversed(klines):
         result.append({
-            "close":            float(k[4]),
-            "volume":           float(k[5]),
-            "taker_buy_volume": float(k[9]),
+            "close":  float(k[4]),
+            "volume": float(k[5]),
         })
     return result
 
@@ -128,6 +173,8 @@ def check_symbol(symbol: str):
     """
     Analiza un símbolo y devuelve una señal si se cumplen las condiciones,
     o None si no hay señal.
+    Paso 1: detecta pico de volumen en la vela actual vs media histórica.
+    Paso 2: si hay pico, consulta el orderbook para determinar dirección.
     """
     klines_raw = get_klines(symbol, limit=MA_PERIOD + 2)
     if len(klines_raw) < MA_PERIOD + 1:
@@ -135,10 +182,8 @@ def check_symbol(symbol: str):
 
     klines = parse_klines(klines_raw)
 
-    # La vela actual es la última (puede estar incompleta), usamos la penúltima
-    # como vela "cerrada" más reciente para el análisis
-    current = klines[-1]        # vela en formación (la más fresca)
-    history = klines[:-1]       # velas anteriores completas
+    current = klines[-1]   # vela más reciente (en formación)
+    history = klines[:-1]  # velas anteriores completas
 
     # Media de volumen de las últimas MA_PERIOD velas completas
     avg_volume = sum(k["volume"] for k in history[-MA_PERIOD:]) / MA_PERIOD
@@ -151,16 +196,8 @@ def check_symbol(symbol: str):
     if vol_ratio < VOLUME_MULTIPLIER:
         return None
 
-    # Dominancia compradora/vendedora
-    total_vol = current["volume"]
-    if total_vol == 0:
-        return None
-
-    buy_vol  = current["taker_buy_volume"]
-    sell_vol = total_vol - buy_vol
-
-    buy_ratio  = buy_vol / total_vol
-    sell_ratio = sell_vol / total_vol
+    # Hay pico de volumen — ahora consultamos el orderbook para la dirección
+    buy_ratio, sell_ratio = get_orderbook_pressure(symbol)
 
     if buy_ratio >= DOMINANCE_THRESHOLD:
         direction = "LONG"
