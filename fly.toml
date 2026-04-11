@@ -1,0 +1,16 @@
+app = "cryptosignalbot"
+primary_region = "mad"
+
+[build]
+
+[env]
+  POLL_INTERVAL = "10"
+  DAILY_REPORT_HOUR = "23"
+  VOLUME_MULTIPLIER = "3.0"
+  DOMINANCE_THRESHOLD = "0.75"
+  COOLDOWN_MINUTES = "30"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
