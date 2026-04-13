@@ -33,17 +33,8 @@ RSI_LONG_MAX  = int(os.environ.get("RSI_LONG_MAX", "67"))
 RSI_SHORT_MIN = int(os.environ.get("RSI_SHORT_MIN", "50"))
 RSI_OVERBOUGHT= int(os.environ.get("RSI_OVERBOUGHT", "72"))
 
-# Pares de Quantfury en KuCoin
-SYMBOLS = [
-    "BTC-USDT", "SOL-USDT", "AAVE-USDT", "LINK-USDT", "DOT-USDT",
-    "ETH-USDT", "ARB-USDT", "AVAX-USDT", "NEO-USDT", "OP-USDT",
-    "POL-USDT", "RENDER-USDT", "RUNE-USDT", "S-USDT", "SUI-USDT",
-    "TAO-USDT", "THETA-USDT", "TON-USDT", "APT-USDT", "HBAR-USDT",
-    "INJ-USDT", "DOGE-USDT", "LTC-USDT", "NEAR-USDT", "BCH-USDT",
-    "ATOM-USDT", "UNI-USDT", "SAND-USDT", "ADA-USDT", "MANA-USDT",
-    "FIL-USDT", "XRP-USDT", "ONDO-USDT", "VIRTUAL-USDT", "XLM-USDT",
-    "ZEC-USDT",
-]
+# Solo XRP — parámetros optimizados por backtesting específicamente para este par
+SYMBOLS = ["XRP-USDT"]
 
 KUCOIN_BASE = "https://api.kucoin.com"
 
