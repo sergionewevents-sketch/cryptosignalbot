@@ -20,19 +20,19 @@ POLL_INTERVAL       = int(os.environ.get("POLL_INTERVAL", "10"))
 DAILY_REPORT_HOUR   = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
 
 # Tiempos de cierre múltiples
-CLOSE_TIMES = [5, 7, 9]  # minutos
+CLOSE_TIMES = [5, 7, 9]
 
 # Filtro de horario (hora Madrid CEST = UTC+2)
-TRADING_HOUR_START  = int(os.environ.get("TRADING_HOUR_START", "9"))   # 9:00 Madrid
-TRADING_HOUR_END    = int(os.environ.get("TRADING_HOUR_END", "20"))    # 20:00 Madrid
+TRADING_HOUR_START = int(os.environ.get("TRADING_HOUR_START", "9"))
+TRADING_HOUR_END   = int(os.environ.get("TRADING_HOUR_END", "20"))
 
 # Filtro RSI
-RSI_PERIOD          = int(os.environ.get("RSI_PERIOD", "14"))
-RSI_LONG_MAX        = int(os.environ.get("RSI_LONG_MAX", "65"))   # LONG solo si RSI < 65
-RSI_SHORT_MIN       = int(os.environ.get("RSI_SHORT_MIN", "35"))  # SHORT solo si RSI > 35
-RSI_OVERBOUGHT      = int(os.environ.get("RSI_OVERBOUGHT", "68")) # zona sobrecompra
+RSI_PERIOD    = int(os.environ.get("RSI_PERIOD", "14"))
+RSI_LONG_MAX  = int(os.environ.get("RSI_LONG_MAX", "70"))   # LONG solo si RSI < 70
+RSI_SHORT_MIN = int(os.environ.get("RSI_SHORT_MIN", "35"))  # SHORT solo si RSI > 35
+RSI_OVERBOUGHT= int(os.environ.get("RSI_OVERBOUGHT", "72")) # zona sobrecompra
 
-# Pares de Quantfury en KuCoin (formato BASE-USDT)
+# Pares de Quantfury en KuCoin
 SYMBOLS = [
     "BTC-USDT", "SOL-USDT", "AAVE-USDT", "LINK-USDT", "DOT-USDT",
     "ETH-USDT", "ARB-USDT", "AVAX-USDT", "NEO-USDT", "OP-USDT",
@@ -56,13 +56,10 @@ last_signal_time = {}
 pending_signals  = []
 
 def make_stats():
-    return {
-        t: {"total": 0, "win": 0, "loss": 0, "pnl": 0.0}
-        for t in CLOSE_TIMES
-    }
+    return {t: {"total": 0, "win": 0, "loss": 0, "pnl": 0.0} for t in CLOSE_TIMES}
 
-daily_stats  = make_stats()
-weekly_stats = make_stats()
+daily_stats        = make_stats()
+weekly_stats       = make_stats()
 last_daily_report  = None
 last_weekly_report = None
 
@@ -83,13 +80,6 @@ def send_telegram(message: str):
 # KUCOIN API
 # ============================================================
 def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
-    """
-    Obtiene las últimas velas de 1 minuto para un símbolo.
-    KuCoin kline endpoint: /api/v1/market/candles
-    interval: "1min"
-    Respuesta: list de [time, open, close, high, low, volume, turnover]
-    Orden: más reciente primero
-    """
     try:
         url = f"{KUCOIN_BASE}/api/v1/market/candles"
         params = {"symbol": symbol, "type": interval}
@@ -97,7 +87,7 @@ def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
         if r.status_code == 200:
             data = r.json()
             if data.get("code") == "200000":
-                return data["data"][:limit]  # ya viene ordenado desc
+                return data["data"][:limit]
             else:
                 log.error(f"KuCoin error {symbol}: {data.get('msg')}")
                 return []
@@ -116,7 +106,6 @@ def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
         return []
 
 def get_current_price(symbol: str):
-    """Obtiene el precio actual de un símbolo."""
     try:
         url = f"{KUCOIN_BASE}/api/v1/market/orderbook/level1"
         r = requests.get(url, params={"symbol": symbol}, timeout=10)
@@ -130,11 +119,6 @@ def get_current_price(symbol: str):
         return None
 
 def parse_klines(klines: list):
-    """
-    KuCoin formato: [time, open, close, high, low, volume, turnover]
-    Viene en orden DESCENDENTE — invertimos para orden cronológico.
-    Usamos close como precio y volume como volumen.
-    """
     result = []
     for k in reversed(klines):
         result.append({
@@ -144,17 +128,13 @@ def parse_klines(klines: list):
     return result
 
 def get_orderbook_pressure(symbol: str):
-    """
-    Obtiene presión compradora/vendedora del orderbook de KuCoin.
-    Suma volumen de los primeros 20 niveles de bid y ask.
-    """
     try:
         url = f"{KUCOIN_BASE}/api/v1/market/orderbook/level2_20"
         r = requests.get(url, params={"symbol": symbol}, timeout=10)
         if r.status_code == 200:
             data = r.json()
             if data.get("code") == "200000":
-                bids = data["data"]["bids"]  # [[price, qty], ...]
+                bids = data["data"]["bids"]
                 asks = data["data"]["asks"]
                 bid_vol = sum(float(b[1]) for b in bids)
                 ask_vol = sum(float(a[1]) for a in asks)
@@ -171,7 +151,6 @@ def get_orderbook_pressure(symbol: str):
 # FILTRO DE HORARIO
 # ============================================================
 def is_trading_hours() -> bool:
-    """Devuelve True si estamos en horario de trading (hora Madrid)."""
     now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
     return TRADING_HOUR_START <= now_madrid.hour < TRADING_HOUR_END
 
@@ -179,26 +158,18 @@ def is_trading_hours() -> bool:
 # RSI
 # ============================================================
 def calculate_rsi(klines: list, period: int = 14) -> float:
-    """
-    Calcula el RSI de las últimas `period` velas.
-    klines: lista de dicts con clave 'close', orden cronológico ascendente.
-    """
     if len(klines) < period + 1:
-        return 50.0  # valor neutro si no hay suficientes datos
-
+        return 50.0
     closes = [k["close"] for k in klines[-(period + 1):]]
     gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i - 1]
         gains.append(max(diff, 0))
         losses.append(max(-diff, 0))
-
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
-
     if avg_loss == 0:
         return 100.0
-
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
@@ -206,17 +177,9 @@ def calculate_rsi(klines: list, period: int = 14) -> float:
 # LÓGICA DE DETECCIÓN
 # ============================================================
 def check_symbol(symbol: str):
-    """
-    1. Filtro de horario — no opera de 20:00 a 09:00 hora Madrid
-    2. Detecta pico de volumen vs media histórica
-    3. Consulta orderbook para dirección
-    4. Filtro RSI — LONG solo si RSI < 65, SHORT solo si RSI > 35
-    """
-    # Filtro horario
     if not is_trading_hours():
         return None
 
-    # Necesitamos RSI_PERIOD + MA_PERIOD + 2 velas para tener suficientes datos
     limit = max(RSI_PERIOD + 2, MA_PERIOD + 2)
     klines_raw = get_klines(symbol, limit=limit)
     if len(klines_raw) < MA_PERIOD + 1:
@@ -226,7 +189,6 @@ def check_symbol(symbol: str):
     current = klines[-1]
     history = klines[:-1]
 
-    # Volumen anómalo
     avg_volume = sum(k["volume"] for k in history[-MA_PERIOD:]) / MA_PERIOD
     if avg_volume == 0:
         return None
@@ -235,7 +197,6 @@ def check_symbol(symbol: str):
     if vol_ratio < VOLUME_MULTIPLIER:
         return None
 
-    # Pico detectado — consultar orderbook para dirección
     buy_ratio, sell_ratio = get_orderbook_pressure(symbol)
 
     if buy_ratio >= DOMINANCE_THRESHOLD:
@@ -247,16 +208,16 @@ def check_symbol(symbol: str):
     else:
         return None
 
-    # Filtro RSI
     rsi = calculate_rsi(klines, period=RSI_PERIOD)
+
     if direction == "LONG" and rsi >= RSI_LONG_MAX:
         log.info(f"Señal {symbol} LONG descartada por RSI alto: {rsi}")
         return None
+    if direction == "LONG" and rsi >= RSI_OVERBOUGHT:
+        log.info(f"Señal {symbol} LONG descartada por sobrecompra: RSI {rsi}")
+        return None
     if direction == "SHORT" and rsi <= RSI_SHORT_MIN:
         log.info(f"Señal {symbol} SHORT descartada por RSI bajo: {rsi}")
-        return None
-    if rsi >= RSI_OVERBOUGHT and direction == "LONG":
-        log.info(f"Señal {symbol} LONG descartada por sobrecompra: RSI {rsi}")
         return None
 
     return {
@@ -279,10 +240,9 @@ def is_in_cooldown(symbol: str) -> bool:
 # ============================================================
 def format_signal(signal: dict) -> str:
     symbol_name = signal["symbol"].replace("-USDT", "")
-    emoji  = "🟢" if signal["direction"] == "LONG" else "🔴"
-    action = "LONG  📈" if signal["direction"] == "LONG" else "SHORT 📉"
+    emoji     = "🟢" if signal["direction"] == "LONG" else "🔴"
+    action    = "LONG  📈" if signal["direction"] == "LONG" else "SHORT 📉"
     dom_label = "💚 Dominancia compradora" if signal["direction"] == "LONG" else "🔴 Dominancia vendedora"
-
     return (
         f"{emoji} <b>SEÑAL {action} — {symbol_name}/USDT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -290,7 +250,7 @@ def format_signal(signal: dict) -> str:
         f"📊 Volumen: <b>{signal['vol_ratio']}x</b> sobre la media\n"
         f"{dom_label}: <b>{signal['dominance_pct']}%</b>\n"
         f"📉 RSI: <b>{signal.get('rsi', '-')}</b>\n"
-        f"⏱️ Cierre estimado en {CLOSE_MINUTES} min\n"
+        f"⏱️ Cierres: 5, 7 y 9 min\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
     )
@@ -298,46 +258,52 @@ def format_signal(signal: dict) -> str:
 def format_resolution(signal: dict, close_price: float) -> str:
     symbol_name = signal["symbol"].replace("-USDT", "")
     entry = signal["entry_price"]
+    t = signal["close_min"]
     pct_change = ((close_price - entry) / entry) * 100
     pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
     pnl_eur = round(pnl_pct / 100, 4)
     result_emoji = "✅" if pnl_pct > 0 else "❌"
     result_label = "GANADA" if pnl_pct > 0 else "PERDIDA"
-
+    sign = "+" if pnl_eur >= 0 else ""
     return (
-        f"{result_emoji} <b>CIERRE — {symbol_name} {signal['direction']} — {result_label}</b>\n"
+        f"{result_emoji} <b>CIERRE {t}min — {symbol_name} {signal['direction']} — {result_label}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📥 Entrada: ${entry:,.4f}\n"
         f"📤 Cierre:  ${close_price:,.4f}\n"
         f"📊 Movimiento: {pct_change:+.2f}%\n"
-        f"💶 P&L (1€): {'+' if pnl_eur > 0 else ''}{pnl_eur:.4f}€\n"
+        f"💶 P&L (1€): {sign}{pnl_eur:.4f}€\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
+
+def format_stats_block(stats: dict, title: str) -> str:
+    lines = [f"<b>{title}</b>", "━━━━━━━━━━━━━━━━━━━"]
+    total = stats[CLOSE_TIMES[0]]["total"]
+    lines.append(f"📨 Señales: <b>{total}</b>")
+    for t in CLOSE_TIMES:
+        s = stats[t]
+        if s["total"] == 0:
+            lines.append(f"⏱️ {t}min → sin datos")
+            continue
+        wr = round((s["win"] / s["total"]) * 100, 1)
+        pnl = round(s["pnl"], 4)
+        pnl_str = f"+{pnl}€" if pnl >= 0 else f"{pnl}€"
+        lines.append(f"⏱️ {t}min → {s['win']}/{s['total']} ({wr}%) | {pnl_str}")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 def format_daily_report() -> str:
-    s = daily_stats
-    total = s["total"]
+    total = daily_stats[CLOSE_TIMES[0]]["total"]
     if total == 0:
         return "📊 <b>RESUMEN DIARIO</b>\n\nNo hubo señales hoy."
+    date_str = datetime.now(timezone.utc).strftime("%d %b %Y")
+    return "📊 " + format_stats_block(daily_stats, f"RESUMEN DIARIO — {date_str}")
 
-    win_rate = round((s["win"] / total) * 100, 1)
-    pnl = round(s["pnl"], 4)
-    pnl_str = f"+{pnl}€" if pnl >= 0 else f"{pnl}€"
-    best  = s["best_signal"]
-    worst = s["worst_signal"]
-    best_str  = f"\n🏆 Mejor: {best['symbol'].replace('-USDT','')} {best['direction']} ({'+' if best['pnl']>=0 else ''}{best['pnl']:.4f}€)" if best else ""
-    worst_str = f"\n💀 Peor:  {worst['symbol'].replace('-USDT','')} {worst['direction']} ({'+' if worst['pnl']>=0 else ''}{worst['pnl']:.4f}€)" if worst else ""
-
-    return (
-        f"📊 <b>RESUMEN DIARIO — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📨 Señales: <b>{total}</b>\n"
-        f"✅ Acertadas: <b>{s['win']}</b> ({win_rate}%)\n"
-        f"❌ Falladas:  <b>{s['loss']}</b>\n"
-        f"💶 P&L total: <b>{pnl_str}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━"
-        f"{best_str}{worst_str}"
-    )
+def format_weekly_report() -> str:
+    total = weekly_stats[CLOSE_TIMES[0]]["total"]
+    if total == 0:
+        return "📊 <b>RESUMEN SEMANAL</b>\n\nNo hubo señales esta semana."
+    date_str = datetime.now(timezone.utc).strftime("%d %b %Y")
+    return "📊 " + format_stats_block(weekly_stats, f"RESUMEN SEMANAL — {date_str}")
 
 # ============================================================
 # RESOLUCIÓN DE SEÑALES
@@ -350,18 +316,15 @@ def resolve_pending_signals():
         elapsed = (now - signal["entry_time"]).total_seconds()
         if elapsed < signal["close_min"] * 60:
             continue
-
         close_price = get_current_price(signal["symbol"])
         if close_price is None:
             continue
-
         signal["resolved"] = True
         entry = signal["entry_price"]
         pct_change = ((close_price - entry) / entry) * 100
         pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
         pnl_eur = round(pnl_pct / 100, 4)
         t = signal["close_min"]
-
         daily_stats[t]["total"] += 1
         daily_stats[t]["pnl"] = round(daily_stats[t]["pnl"] + pnl_eur, 4)
         weekly_stats[t]["total"] += 1
@@ -372,7 +335,6 @@ def resolve_pending_signals():
         else:
             daily_stats[t]["loss"] += 1
             weekly_stats[t]["loss"] += 1
-
         send_telegram(format_resolution(signal, close_price))
         log.info(f"Cierre {t}min: {signal['symbol']} {signal['direction']} → {pnl_eur:+.4f}€")
 
@@ -390,12 +352,11 @@ def check_daily_report():
     last_daily_report = today
     send_telegram(format_daily_report())
     log.info("Resumen diario enviado")
-    daily_stats.update(make_stats())
+    daily_stats = make_stats()
 
 def check_weekly_report():
     global last_weekly_report, weekly_stats
     now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
-    # Enviar el domingo a las 23:00
     if now_madrid.weekday() != 6:
         return
     if now_madrid.hour != DAILY_REPORT_HOUR:
@@ -406,7 +367,7 @@ def check_weekly_report():
     last_weekly_report = today
     send_telegram(format_weekly_report())
     log.info("Resumen semanal enviado")
-    weekly_stats.update(make_stats())
+    weekly_stats = make_stats()
 
 # ============================================================
 # SERVIDOR HTTP (requerido por Fly.io)
@@ -427,11 +388,12 @@ def start_health_server():
 # BUCLE PRINCIPAL
 # ============================================================
 def main():
-    log.info("🚀 CryptoSignalBot v3 arrancado!")
+    log.info("🚀 CryptoSignalBot v4 arrancado!")
     send_telegram(
-        "🚀 <b>CryptoSignalBot activado</b>\n"
+        "🚀 <b>CryptoSignalBot v4 activado</b>\n"
         f"Monitorizando {len(SYMBOLS)} pares cada {POLL_INTERVAL}s\n"
-        f"Umbral volumen: {VOLUME_MULTIPLIER}x | Dominancia: {int(DOMINANCE_THRESHOLD*100)}% | Cooldown: {COOLDOWN_MINUTES}min"
+        f"Volumen: {VOLUME_MULTIPLIER}x | Dominancia: {int(DOMINANCE_THRESHOLD*100)}% | RSI: <{RSI_LONG_MAX}/>{ RSI_SHORT_MIN}\n"
+        f"Horario: {TRADING_HOUR_START}:00-{TRADING_HOUR_END}:00 Madrid | Cooldown: {COOLDOWN_MINUTES}min"
     )
 
     cycle = 0
@@ -439,7 +401,7 @@ def main():
         try:
             cycle += 1
             signals_this_cycle = 0
-            signaled_this_cycle = set()  # evita duplicados en el mismo ciclo
+            signaled_this_cycle = set()
 
             if not is_trading_hours():
                 if cycle % 60 == 0:
@@ -474,7 +436,7 @@ def main():
                         "resolved":    False,
                     })
 
-                log.info(f"Señal: {symbol} {signal['direction']} | {signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom")
+                log.info(f"Señal: {symbol} {signal['direction']} | {signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom | RSI {signal['rsi']}")
                 time.sleep(1.0)
 
             resolve_pending_signals()
