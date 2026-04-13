@@ -12,25 +12,26 @@ from datetime import datetime, timezone, timedelta
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
 
-VOLUME_MULTIPLIER   = float(os.environ.get("VOLUME_MULTIPLIER", "3.0"))
-DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.68"))
+VOLUME_MULTIPLIER   = float(os.environ.get("VOLUME_MULTIPLIER", "7.0"))   # 7x backtesting
+DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.81")) # 81% backtesting
 COOLDOWN_MINUTES    = int(os.environ.get("COOLDOWN_MINUTES", "30"))
-MA_PERIOD           = int(os.environ.get("MA_PERIOD", "20"))
+MA_PERIOD           = int(os.environ.get("MA_PERIOD", "37"))               # 37 backtesting
 POLL_INTERVAL       = int(os.environ.get("POLL_INTERVAL", "10"))
 DAILY_REPORT_HOUR   = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
 
 # Tiempos de cierre múltiples
 CLOSE_TIMES = [5, 7, 9]
+BEST_CLOSE_MIN = 8  # el mejor según backtesting
 
-# Filtro de horario (hora Madrid CEST = UTC+2)
-TRADING_HOUR_START = int(os.environ.get("TRADING_HOUR_START", "9"))
-TRADING_HOUR_END   = int(os.environ.get("TRADING_HOUR_END", "20"))
+# Filtro de horario — 12:00-16:00 UTC = 14:00-18:00 Madrid
+TRADING_HOUR_START = int(os.environ.get("TRADING_HOUR_START", "12"))
+TRADING_HOUR_END   = int(os.environ.get("TRADING_HOUR_END", "16"))
 
-# Filtro RSI
-RSI_PERIOD    = int(os.environ.get("RSI_PERIOD", "14"))
-RSI_LONG_MAX  = int(os.environ.get("RSI_LONG_MAX", "70"))   # LONG solo si RSI < 70
-RSI_SHORT_MIN = int(os.environ.get("RSI_SHORT_MIN", "35"))  # SHORT solo si RSI > 35
-RSI_OVERBOUGHT= int(os.environ.get("RSI_OVERBOUGHT", "72")) # zona sobrecompra
+# Filtro RSI — valores del backtesting
+RSI_PERIOD    = int(os.environ.get("RSI_PERIOD", "21"))
+RSI_LONG_MAX  = int(os.environ.get("RSI_LONG_MAX", "67"))
+RSI_SHORT_MIN = int(os.environ.get("RSI_SHORT_MIN", "50"))
+RSI_OVERBOUGHT= int(os.environ.get("RSI_OVERBOUGHT", "72"))
 
 # Pares de Quantfury en KuCoin
 SYMBOLS = [
@@ -213,9 +214,6 @@ def check_symbol(symbol: str):
     if direction == "LONG" and rsi >= RSI_LONG_MAX:
         log.info(f"Señal {symbol} LONG descartada por RSI alto: {rsi}")
         return None
-    if direction == "LONG" and rsi >= RSI_OVERBOUGHT:
-        log.info(f"Señal {symbol} LONG descartada por sobrecompra: RSI {rsi}")
-        return None
     if direction == "SHORT" and rsi <= RSI_SHORT_MIN:
         log.info(f"Señal {symbol} SHORT descartada por RSI bajo: {rsi}")
         return None
@@ -287,7 +285,9 @@ def format_stats_block(stats: dict, title: str) -> str:
         wr = round((s["win"] / s["total"]) * 100, 1)
         pnl = round(s["pnl"], 4)
         pnl_str = f"+{pnl}€" if pnl >= 0 else f"{pnl}€"
-        lines.append(f"⏱️ {t}min → {s['win']}/{s['total']} ({wr}%) | {pnl_str}")
+        win = s["win"]
+        tot = s["total"]
+        lines.append(f"⏱️ {t}min → {win}/{tot} ({wr}%) | {pnl_str}")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
@@ -388,12 +388,14 @@ def start_health_server():
 # BUCLE PRINCIPAL
 # ============================================================
 def main():
-    log.info("🚀 CryptoSignalBot v4 arrancado!")
+    log.info("🚀 CryptoSignalBot v5 arrancado!")
     send_telegram(
-        "🚀 <b>CryptoSignalBot v4 activado</b>\n"
-        f"Monitorizando {len(SYMBOLS)} pares cada {POLL_INTERVAL}s\n"
-        f"Volumen: {VOLUME_MULTIPLIER}x | Dominancia: {int(DOMINANCE_THRESHOLD*100)}% | RSI: <{RSI_LONG_MAX}/>{ RSI_SHORT_MIN}\n"
-        f"Horario: {TRADING_HOUR_START}:00-{TRADING_HOUR_END}:00 Madrid | Cooldown: {COOLDOWN_MINUTES}min"
+        "🚀 <b>CryptoSignalBot v5 activado</b>\n"
+        f"📊 Parámetros optimizados por backtesting\n"
+        f"Volumen: {VOLUME_MULTIPLIER}x | Dominancia: {int(DOMINANCE_THRESHOLD*100)}%\n"
+        f"RSI: período {RSI_PERIOD} | máx LONG {RSI_LONG_MAX} | mín SHORT {RSI_SHORT_MIN}\n"
+        f"Horario: {TRADING_HOUR_START}:00-{TRADING_HOUR_END}:00 UTC (14:00-18:00 Madrid)\n"
+        f"Cooldown: {COOLDOWN_MINUTES}min | Cierres: 5, 7 y 9 min"
     )
 
     cycle = 0
