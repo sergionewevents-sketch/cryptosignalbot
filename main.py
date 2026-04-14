@@ -6,35 +6,45 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 
+# Cargar estrategias
+from estrategias.xrp import (
+    SYMBOL as XRP_SYMBOL,
+    VOLUME_MULTIPLIER, MA_PERIOD, DOMINANCE_THRESHOLD,
+    RSI_PERIOD, RSI_LONG_MAX, RSI_SHORT_MIN,
+    TAKE_PROFIT_PCT, STOP_LOSS_PCT, MAX_MINUTES,
+    TRADING_HOUR_START, TRADING_HOUR_END,
+)
+
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GLOBAL
 # ============================================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
+POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", "5"))
+DAILY_REPORT_HOUR = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
+COOLDOWN_MINUTES  = int(os.environ.get("COOLDOWN_MINUTES", "30"))
 
-VOLUME_MULTIPLIER   = float(os.environ.get("VOLUME_MULTIPLIER", "7.0"))   # 7x backtesting
-DOMINANCE_THRESHOLD = float(os.environ.get("DOMINANCE_THRESHOLD", "0.81")) # 81% backtesting
-COOLDOWN_MINUTES    = int(os.environ.get("COOLDOWN_MINUTES", "30"))
-MA_PERIOD           = int(os.environ.get("MA_PERIOD", "37"))               # 37 backtesting
-POLL_INTERVAL       = int(os.environ.get("POLL_INTERVAL", "10"))
-DAILY_REPORT_HOUR   = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
-
-# Tiempos de cierre múltiples
-CLOSE_TIMES = [5, 7, 9]
-BEST_CLOSE_MIN = 8  # el mejor según backtesting
-
-# Filtro de horario — 12:00-16:00 UTC = 14:00-18:00 Madrid
-TRADING_HOUR_START = int(os.environ.get("TRADING_HOUR_START", "12"))
-TRADING_HOUR_END   = int(os.environ.get("TRADING_HOUR_END", "16"))
-
-# Filtro RSI — valores del backtesting
-RSI_PERIOD    = int(os.environ.get("RSI_PERIOD", "21"))
-RSI_LONG_MAX  = int(os.environ.get("RSI_LONG_MAX", "67"))
-RSI_SHORT_MIN = int(os.environ.get("RSI_SHORT_MIN", "50"))
-RSI_OVERBOUGHT= int(os.environ.get("RSI_OVERBOUGHT", "72"))
-
-# Solo XRP — parámetros optimizados por backtesting específicamente para este par
-SYMBOLS = ["XRP-USDT"]
+# Lista de estrategias activas
+# Cada estrategia es un dict con todos sus parámetros
+STRATEGIES = [
+    {
+        "symbol":             XRP_SYMBOL,
+        "volume_multiplier":  VOLUME_MULTIPLIER,
+        "ma_period":          MA_PERIOD,
+        "dominance_threshold":DOMINANCE_THRESHOLD,
+        "rsi_period":         RSI_PERIOD,
+        "rsi_long_max":       RSI_LONG_MAX,
+        "rsi_short_min":      RSI_SHORT_MIN,
+        "take_profit_pct":    TAKE_PROFIT_PCT,
+        "stop_loss_pct":      STOP_LOSS_PCT,
+        "max_minutes":        MAX_MINUTES,
+        "hour_start":         TRADING_HOUR_START,
+        "hour_end":           TRADING_HOUR_END,
+    },
+    # Añadir más estrategias aquí cuando hagamos backtesting de otros pares:
+    # from estrategias.btc import ...
+    # { "symbol": BTC_SYMBOL, ... },
+]
 
 KUCOIN_BASE = "https://api.kucoin.com"
 
@@ -44,14 +54,11 @@ log = logging.getLogger(__name__)
 # ============================================================
 # ESTADO
 # ============================================================
-last_signal_time = {}
-pending_signals  = []
+last_signal_time = {}  # symbol -> datetime
+pending_signals  = []  # lista de operaciones abiertas
 
-def make_stats():
-    return {t: {"total": 0, "win": 0, "loss": 0, "pnl": 0.0} for t in CLOSE_TIMES}
-
-daily_stats        = make_stats()
-weekly_stats       = make_stats()
+daily_stats  = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
+weekly_stats = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
 last_daily_report  = None
 last_weekly_report = None
 
@@ -71,10 +78,10 @@ def send_telegram(message: str):
 # ============================================================
 # KUCOIN API
 # ============================================================
-def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
+def get_klines(symbol: str, limit: int = 50):
     try:
         url = f"{KUCOIN_BASE}/api/v1/market/candles"
-        params = {"symbol": symbol, "type": interval}
+        params = {"symbol": symbol, "type": "1min"}
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
             data = r.json()
@@ -86,9 +93,6 @@ def get_klines(symbol: str, interval: str = "1min", limit: int = 22):
         elif r.status_code == 429:
             log.warning(f"KuCoin rate limit {symbol}, esperando 5s...")
             time.sleep(5)
-            return []
-        elif r.status_code == 400:
-            log.warning(f"KuCoin par no disponible: {symbol}")
             return []
         else:
             log.error(f"KuCoin HTTP error {symbol}: {r.status_code}")
@@ -110,15 +114,6 @@ def get_current_price(symbol: str):
         log.error(f"KuCoin price exception {symbol}: {e}")
         return None
 
-def parse_klines(klines: list):
-    result = []
-    for k in reversed(klines):
-        result.append({
-            "close":  float(k[2]),
-            "volume": float(k[5]),
-        })
-    return result
-
 def get_orderbook_pressure(symbol: str):
     try:
         url = f"{KUCOIN_BASE}/api/v1/market/orderbook/level2_20"
@@ -139,17 +134,19 @@ def get_orderbook_pressure(symbol: str):
         log.error(f"KuCoin orderbook exception {symbol}: {e}")
         return 0.5, 0.5
 
-# ============================================================
-# FILTRO DE HORARIO
-# ============================================================
-def is_trading_hours() -> bool:
-    now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
-    return TRADING_HOUR_START <= now_madrid.hour < TRADING_HOUR_END
+def parse_klines(klines: list):
+    result = []
+    for k in reversed(klines):
+        result.append({
+            "close":  float(k[2]),
+            "volume": float(k[5]),
+        })
+    return result
 
 # ============================================================
 # RSI
 # ============================================================
-def calculate_rsi(klines: list, period: int = 14) -> float:
+def calculate_rsi(klines: list, period: int) -> float:
     if len(klines) < period + 1:
         return 50.0
     closes = [k["close"] for k in klines[-(period + 1):]]
@@ -166,47 +163,68 @@ def calculate_rsi(klines: list, period: int = 14) -> float:
     return round(100 - (100 / (1 + rs)), 2)
 
 # ============================================================
+# HORARIO
+# ============================================================
+def is_trading_hours(hour_start: int, hour_end: int) -> bool:
+    now_utc = datetime.now(timezone.utc)
+    return hour_start <= now_utc.hour < hour_end
+
+# ============================================================
+# COOLDOWN
+# ============================================================
+def is_in_cooldown(symbol: str) -> bool:
+    if symbol not in last_signal_time:
+        return False
+    elapsed = (datetime.now(timezone.utc) - last_signal_time[symbol]).total_seconds()
+    return elapsed < COOLDOWN_MINUTES * 60
+
+# ============================================================
 # LÓGICA DE DETECCIÓN
 # ============================================================
-def check_symbol(symbol: str):
-    if not is_trading_hours():
+def check_strategy(strat: dict):
+    symbol = strat["symbol"]
+
+    if not is_trading_hours(strat["hour_start"], strat["hour_end"]):
         return None
 
-    limit = max(RSI_PERIOD + 2, MA_PERIOD + 2)
+    if is_in_cooldown(symbol):
+        return None
+
+    limit = max(strat["rsi_period"] + 2, strat["ma_period"] + 2)
     klines_raw = get_klines(symbol, limit=limit)
-    if len(klines_raw) < MA_PERIOD + 1:
+    if len(klines_raw) < strat["ma_period"] + 1:
         return None
 
     klines = parse_klines(klines_raw)
     current = klines[-1]
     history = klines[:-1]
 
-    avg_volume = sum(k["volume"] for k in history[-MA_PERIOD:]) / MA_PERIOD
+    avg_volume = sum(k["volume"] for k in history[-strat["ma_period"]:]) / strat["ma_period"]
     if avg_volume == 0:
         return None
 
     vol_ratio = current["volume"] / avg_volume
-    if vol_ratio < VOLUME_MULTIPLIER:
+    if vol_ratio < strat["volume_multiplier"]:
         return None
 
     buy_ratio, sell_ratio = get_orderbook_pressure(symbol)
 
-    if buy_ratio >= DOMINANCE_THRESHOLD:
+    if buy_ratio >= strat["dominance_threshold"]:
         direction = "LONG"
         dominance_pct = round(buy_ratio * 100, 1)
-    elif sell_ratio >= DOMINANCE_THRESHOLD:
+    elif sell_ratio >= strat["dominance_threshold"]:
         direction = "SHORT"
         dominance_pct = round(sell_ratio * 100, 1)
     else:
         return None
 
-    rsi = calculate_rsi(klines, period=RSI_PERIOD)
+    rsi = calculate_rsi(klines, period=strat["rsi_period"])
 
-    if direction == "LONG" and rsi >= RSI_LONG_MAX:
-        log.info(f"Señal {symbol} LONG descartada por RSI alto: {rsi}")
+    if direction == "LONG" and rsi >= strat["rsi_long_max"]:
+        log.info(f"{symbol} LONG descartada — RSI alto: {rsi}")
         return None
-    if direction == "SHORT" and rsi <= RSI_SHORT_MIN:
-        log.info(f"Señal {symbol} SHORT descartada por RSI bajo: {rsi}")
+    if direction == "SHORT" and rsi <= strat["rsi_short_min"]:
+        log.info(f"{symbol} SHORT descartada — RSI bajo: {rsi}")
         return None
 
     return {
@@ -216,13 +234,8 @@ def check_symbol(symbol: str):
         "vol_ratio":     round(vol_ratio, 2),
         "dominance_pct": dominance_pct,
         "rsi":           rsi,
+        "strat":         strat,
     }
-
-def is_in_cooldown(symbol: str) -> bool:
-    if symbol not in last_signal_time:
-        return False
-    elapsed = (datetime.now(timezone.utc) - last_signal_time[symbol]).total_seconds()
-    return elapsed < COOLDOWN_MINUTES * 60
 
 # ============================================================
 # FORMATEO DE MENSAJES
@@ -232,102 +245,124 @@ def format_signal(signal: dict) -> str:
     emoji     = "🟢" if signal["direction"] == "LONG" else "🔴"
     action    = "LONG  📈" if signal["direction"] == "LONG" else "SHORT 📉"
     dom_label = "💚 Dominancia compradora" if signal["direction"] == "LONG" else "🔴 Dominancia vendedora"
+    s = signal["strat"]
     return (
         f"{emoji} <b>SEÑAL {action} — {symbol_name}/USDT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Precio: <b>${signal['price']:,.4f}</b>\n"
+        f"💰 Precio entrada: <b>${signal['price']:,.4f}</b>\n"
         f"📊 Volumen: <b>{signal['vol_ratio']}x</b> sobre la media\n"
         f"{dom_label}: <b>{signal['dominance_pct']}%</b>\n"
-        f"📉 RSI: <b>{signal.get('rsi', '-')}</b>\n"
-        f"⏱️ Cierres: 5, 7 y 9 min\n"
+        f"📉 RSI: <b>{signal['rsi']}</b>\n"
+        f"🎯 TP: <b>+{s['take_profit_pct']}%</b> | 🛑 SL: <b>-{s['stop_loss_pct']}%</b>\n"
+        f"⏱️ Cierre máx: <b>{s['max_minutes']} min</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
     )
 
-def format_resolution(signal: dict, close_price: float) -> str:
+def format_resolution(signal: dict, close_price: float, close_reason: str) -> str:
     symbol_name = signal["symbol"].replace("-USDT", "")
     entry = signal["entry_price"]
-    t = signal["close_min"]
     pct_change = ((close_price - entry) / entry) * 100
     pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
     pnl_eur = round(pnl_pct / 100, 4)
     result_emoji = "✅" if pnl_pct > 0 else "❌"
     result_label = "GANADA" if pnl_pct > 0 else "PERDIDA"
     sign = "+" if pnl_eur >= 0 else ""
+
+    reason_labels = {
+        "TP":    "🎯 Take Profit",
+        "SL":    "🛑 Stop Loss",
+        "TIME":  "⏱️ Tiempo máximo",
+    }
+    reason_str = reason_labels.get(close_reason, close_reason)
+
     return (
-        f"{result_emoji} <b>CIERRE {t}min — {symbol_name} {signal['direction']} — {result_label}</b>\n"
+        f"{result_emoji} <b>CIERRE — {symbol_name} {signal['direction']} — {result_label}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📥 Entrada: ${entry:,.4f}\n"
         f"📤 Cierre:  ${close_price:,.4f}\n"
         f"📊 Movimiento: {pct_change:+.2f}%\n"
         f"💶 P&L (1€): {sign}{pnl_eur:.4f}€\n"
+        f"🔖 Motivo: {reason_str}\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
-def format_stats_block(stats: dict, title: str) -> str:
-    lines = [f"<b>{title}</b>", "━━━━━━━━━━━━━━━━━━━"]
-    total = stats[CLOSE_TIMES[0]]["total"]
-    lines.append(f"📨 Señales: <b>{total}</b>")
-    for t in CLOSE_TIMES:
-        s = stats[t]
-        if s["total"] == 0:
-            lines.append(f"⏱️ {t}min → sin datos")
-            continue
-        wr = round((s["win"] / s["total"]) * 100, 1)
-        pnl = round(s["pnl"], 4)
-        pnl_str = f"+{pnl}€" if pnl >= 0 else f"{pnl}€"
-        win = s["win"]
-        tot = s["total"]
-        lines.append(f"⏱️ {t}min → {win}/{tot} ({wr}%) | {pnl_str}")
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    return "\n".join(lines)
-
-def format_daily_report() -> str:
-    total = daily_stats[CLOSE_TIMES[0]]["total"]
-    if total == 0:
-        return "📊 <b>RESUMEN DIARIO</b>\n\nNo hubo señales hoy."
+def format_stats(stats: dict, title: str) -> str:
+    if stats["total"] == 0:
+        return f"📊 <b>{title}</b>\n\nNo hubo señales."
+    wr = round((stats["win"] / stats["total"]) * 100, 1)
+    pnl = round(stats["pnl"], 4)
+    pnl_str = f"+{pnl}€" if pnl >= 0 else f"{pnl}€"
     date_str = datetime.now(timezone.utc).strftime("%d %b %Y")
-    return "📊 " + format_stats_block(daily_stats, f"RESUMEN DIARIO — {date_str}")
-
-def format_weekly_report() -> str:
-    total = weekly_stats[CLOSE_TIMES[0]]["total"]
-    if total == 0:
-        return "📊 <b>RESUMEN SEMANAL</b>\n\nNo hubo señales esta semana."
-    date_str = datetime.now(timezone.utc).strftime("%d %b %Y")
-    return "📊 " + format_stats_block(weekly_stats, f"RESUMEN SEMANAL — {date_str}")
+    return (
+        f"📊 <b>{title} — {date_str}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📨 Señales: <b>{stats['total']}</b>\n"
+        f"✅ Ganadas: <b>{stats['win']}</b> ({wr}%)\n"
+        f"❌ Perdidas: <b>{stats['loss']}</b>\n"
+        f"🎯 Por TP: <b>{stats['tp']}</b>\n"
+        f"🛑 Por SL: <b>{stats['sl']}</b>\n"
+        f"⏱️ Por tiempo: <b>{stats['time']}</b>\n"
+        f"💶 P&L total: <b>{pnl_str}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
 
 # ============================================================
-# RESOLUCIÓN DE SEÑALES
+# RESOLUCIÓN DE SEÑALES (TP / SL / Tiempo)
 # ============================================================
 def resolve_pending_signals():
     now = datetime.now(timezone.utc)
     for signal in pending_signals:
         if signal["resolved"]:
             continue
+
         elapsed = (now - signal["entry_time"]).total_seconds()
-        if elapsed < signal["close_min"] * 60:
-            continue
+        strat = signal["strat"]
+
+        # Obtener precio actual
         close_price = get_current_price(signal["symbol"])
         if close_price is None:
             continue
-        signal["resolved"] = True
+
         entry = signal["entry_price"]
         pct_change = ((close_price - entry) / entry) * 100
         pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
+
+        close_reason = None
+
+        # Check Take Profit
+        if pnl_pct >= strat["take_profit_pct"]:
+            close_reason = "TP"
+        # Check Stop Loss
+        elif pnl_pct <= -strat["stop_loss_pct"]:
+            close_reason = "SL"
+        # Check tiempo máximo
+        elif elapsed >= strat["max_minutes"] * 60:
+            close_reason = "TIME"
+
+        if close_reason is None:
+            continue
+
+        signal["resolved"] = True
         pnl_eur = round(pnl_pct / 100, 4)
-        t = signal["close_min"]
-        daily_stats[t]["total"] += 1
-        daily_stats[t]["pnl"] = round(daily_stats[t]["pnl"] + pnl_eur, 4)
-        weekly_stats[t]["total"] += 1
-        weekly_stats[t]["pnl"] = round(weekly_stats[t]["pnl"] + pnl_eur, 4)
-        if pnl_eur > 0:
-            daily_stats[t]["win"] += 1
-            weekly_stats[t]["win"] += 1
-        else:
-            daily_stats[t]["loss"] += 1
-            weekly_stats[t]["loss"] += 1
-        send_telegram(format_resolution(signal, close_price))
-        log.info(f"Cierre {t}min: {signal['symbol']} {signal['direction']} → {pnl_eur:+.4f}€")
+
+        # Actualizar estadísticas
+        for stats in [daily_stats, weekly_stats]:
+            stats["total"] += 1
+            stats["pnl"] = round(stats["pnl"] + pnl_eur, 4)
+            if pnl_eur > 0:
+                stats["win"] += 1
+            else:
+                stats["loss"] += 1
+            if close_reason == "TP":
+                stats["tp"] += 1
+            elif close_reason == "SL":
+                stats["sl"] += 1
+            else:
+                stats["time"] += 1
+
+        send_telegram(format_resolution(signal, close_price, close_reason))
+        log.info(f"Cierre {close_reason}: {signal['symbol']} {signal['direction']} → {pnl_eur:+.4f}€")
 
 # ============================================================
 # RESUMEN DIARIO Y SEMANAL
@@ -336,29 +371,25 @@ def check_daily_report():
     global last_daily_report, daily_stats
     now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
     today = now_madrid.date()
-    if last_daily_report == today:
-        return
-    if now_madrid.hour != DAILY_REPORT_HOUR:
+    if last_daily_report == today or now_madrid.hour != DAILY_REPORT_HOUR:
         return
     last_daily_report = today
-    send_telegram(format_daily_report())
+    send_telegram(format_stats(daily_stats, "RESUMEN DIARIO"))
     log.info("Resumen diario enviado")
-    daily_stats = make_stats()
+    daily_stats = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
 
 def check_weekly_report():
     global last_weekly_report, weekly_stats
     now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
-    if now_madrid.weekday() != 6:
-        return
-    if now_madrid.hour != DAILY_REPORT_HOUR:
+    if now_madrid.weekday() != 6 or now_madrid.hour != DAILY_REPORT_HOUR:
         return
     today = now_madrid.date()
     if last_weekly_report == today:
         return
     last_weekly_report = today
-    send_telegram(format_weekly_report())
+    send_telegram(format_stats(weekly_stats, "RESUMEN SEMANAL"))
     log.info("Resumen semanal enviado")
-    weekly_stats = make_stats()
+    weekly_stats = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
 
 # ============================================================
 # SERVIDOR HTTP (requerido por Fly.io)
@@ -379,14 +410,13 @@ def start_health_server():
 # BUCLE PRINCIPAL
 # ============================================================
 def main():
-    log.info("🚀 CryptoSignalBot v5 arrancado!")
+    symbols = [s["symbol"].replace("-USDT", "") for s in STRATEGIES]
+    log.info(f"🚀 CryptoSignalBot arrancado! Estrategias: {', '.join(symbols)}")
     send_telegram(
-        "🚀 <b>CryptoSignalBot v5 activado</b>\n"
-        f"📊 Parámetros optimizados por backtesting\n"
-        f"Volumen: {VOLUME_MULTIPLIER}x | Dominancia: {int(DOMINANCE_THRESHOLD*100)}%\n"
-        f"RSI: período {RSI_PERIOD} | máx LONG {RSI_LONG_MAX} | mín SHORT {RSI_SHORT_MIN}\n"
-        f"Horario: {TRADING_HOUR_START}:00-{TRADING_HOUR_END}:00 UTC (14:00-18:00 Madrid)\n"
-        f"Cooldown: {COOLDOWN_MINUTES}min | Cierres: 5, 7 y 9 min"
+        f"🚀 <b>CryptoSignalBot activado</b>\n"
+        f"📊 Estrategias activas: <b>{', '.join(symbols)}</b>\n"
+        f"⏱️ Consulta cada {POLL_INTERVAL}s | Cooldown: {COOLDOWN_MINUTES}min\n"
+        f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
     )
 
     cycle = 0
@@ -394,42 +424,29 @@ def main():
         try:
             cycle += 1
             signals_this_cycle = 0
-            signaled_this_cycle = set()
 
-            if not is_trading_hours():
-                if cycle % 60 == 0:
-                    now_madrid = datetime.now(timezone.utc) + timedelta(hours=2)
-                    log.info(f"Fuera de horario ({now_madrid.strftime('%H:%M')} Madrid) — bot en pausa")
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            for symbol in SYMBOLS:
-                if is_in_cooldown(symbol):
-                    continue
-                if symbol in signaled_this_cycle:
-                    continue
-
-                signal = check_symbol(symbol)
+            for strat in STRATEGIES:
+                signal = check_strategy(strat)
                 if signal is None:
                     continue
 
-                last_signal_time[symbol] = datetime.now(timezone.utc)
-                signaled_this_cycle.add(symbol)
+                last_signal_time[strat["symbol"]] = datetime.now(timezone.utc)
                 signals_this_cycle += 1
                 send_telegram(format_signal(signal))
 
-                now = datetime.now(timezone.utc)
-                for close_min in CLOSE_TIMES:
-                    pending_signals.append({
-                        "symbol":      symbol,
-                        "direction":   signal["direction"],
-                        "entry_price": signal["price"],
-                        "entry_time":  now,
-                        "close_min":   close_min,
-                        "resolved":    False,
-                    })
+                pending_signals.append({
+                    "symbol":      strat["symbol"],
+                    "direction":   signal["direction"],
+                    "entry_price": signal["price"],
+                    "entry_time":  datetime.now(timezone.utc),
+                    "strat":       strat,
+                    "resolved":    False,
+                })
 
-                log.info(f"Señal: {symbol} {signal['direction']} | {signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom | RSI {signal['rsi']}")
+                log.info(
+                    f"Señal: {strat['symbol']} {signal['direction']} | "
+                    f"{signal['vol_ratio']}x vol | {signal['dominance_pct']}% dom | RSI {signal['rsi']}"
+                )
                 time.sleep(1.0)
 
             resolve_pending_signals()
@@ -439,7 +456,7 @@ def main():
 
             if signals_this_cycle > 0:
                 log.info(f"Ciclo {cycle} — {signals_this_cycle} señal(es)")
-            elif cycle % 60 == 0:
+            elif cycle % 120 == 0:
                 log.info(f"Ciclo {cycle} — Sin señales | Pendientes: {len(pending_signals)}")
 
         except Exception as e:
