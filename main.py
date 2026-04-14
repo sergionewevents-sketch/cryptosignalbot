@@ -9,10 +9,23 @@ from datetime import datetime, timezone, timedelta
 # Cargar estrategias
 from estrategias.xrp import (
     SYMBOL as XRP_SYMBOL,
-    VOLUME_MULTIPLIER, MA_PERIOD, DOMINANCE_THRESHOLD,
-    RSI_PERIOD, RSI_LONG_MAX, RSI_SHORT_MIN,
-    TAKE_PROFIT_PCT, STOP_LOSS_PCT, MAX_MINUTES,
-    TRADING_HOUR_START, TRADING_HOUR_END,
+    VOLUME_MULTIPLIER as XRP_VOL, MA_PERIOD as XRP_MA,
+    DOMINANCE_THRESHOLD as XRP_DOM,
+    RSI_PERIOD as XRP_RSI_P, RSI_LONG_MAX as XRP_RSI_L,
+    RSI_SHORT_MIN as XRP_RSI_S,
+    TAKE_PROFIT_PCT as XRP_TP, STOP_LOSS_PCT as XRP_SL,
+    MAX_MINUTES as XRP_MAX, TRADING_HOUR_START as XRP_HS,
+    TRADING_HOUR_END as XRP_HE,
+)
+from estrategias.sol import (
+    SYMBOL as SOL_SYMBOL,
+    VOLUME_MULTIPLIER as SOL_VOL, MA_PERIOD as SOL_MA,
+    DOMINANCE_THRESHOLD as SOL_DOM,
+    RSI_PERIOD as SOL_RSI_P, RSI_LONG_MAX as SOL_RSI_L,
+    RSI_SHORT_MIN as SOL_RSI_S,
+    TAKE_PROFIT_PCT as SOL_TP, STOP_LOSS_PCT as SOL_SL,
+    MAX_MINUTES as SOL_MAX, TRADING_HOUR_START as SOL_HS,
+    TRADING_HOUR_END as SOL_HE,
 )
 
 # ============================================================
@@ -25,23 +38,36 @@ DAILY_REPORT_HOUR = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
 COOLDOWN_MINUTES  = int(os.environ.get("COOLDOWN_MINUTES", "30"))
 
 # Lista de estrategias activas
-# Cada estrategia es un dict con todos sus parámetros
 STRATEGIES = [
     {
         "symbol":             XRP_SYMBOL,
-        "volume_multiplier":  VOLUME_MULTIPLIER,
-        "ma_period":          MA_PERIOD,
-        "dominance_threshold":DOMINANCE_THRESHOLD,
-        "rsi_period":         RSI_PERIOD,
-        "rsi_long_max":       RSI_LONG_MAX,
-        "rsi_short_min":      RSI_SHORT_MIN,
-        "take_profit_pct":    TAKE_PROFIT_PCT,
-        "stop_loss_pct":      STOP_LOSS_PCT,
-        "max_minutes":        MAX_MINUTES,
-        "hour_start":         TRADING_HOUR_START,
-        "hour_end":           TRADING_HOUR_END,
+        "volume_multiplier":  XRP_VOL,
+        "ma_period":          XRP_MA,
+        "dominance_threshold":XRP_DOM,
+        "rsi_period":         XRP_RSI_P,
+        "rsi_long_max":       XRP_RSI_L,
+        "rsi_short_min":      XRP_RSI_S,
+        "take_profit_pct":    XRP_TP,
+        "stop_loss_pct":      XRP_SL,
+        "max_minutes":        XRP_MAX,
+        "hour_start":         XRP_HS,
+        "hour_end":           XRP_HE,
     },
-    # Añadir más estrategias aquí cuando hagamos backtesting de otros pares:
+    {
+        "symbol":             SOL_SYMBOL,
+        "volume_multiplier":  SOL_VOL,
+        "ma_period":          SOL_MA,
+        "dominance_threshold":SOL_DOM,
+        "rsi_period":         SOL_RSI_P,
+        "rsi_long_max":       SOL_RSI_L,
+        "rsi_short_min":      SOL_RSI_S,
+        "take_profit_pct":    SOL_TP,
+        "stop_loss_pct":      SOL_SL,
+        "max_minutes":        SOL_MAX,
+        "hour_start":         SOL_HS,
+        "hour_end":           SOL_HE,
+    },
+    # Añadir más estrategias aquí:
     # from estrategias.btc import ...
     # { "symbol": BTC_SYMBOL, ... },
 ]
