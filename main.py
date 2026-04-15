@@ -31,13 +31,12 @@ from estrategias.sol import (
 # ============================================================
 # CONFIGURACIÓN GLOBAL
 # ============================================================
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
-POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", "5"))
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI")
+TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
+POLL_INTERVAL     = int(os.environ.get("POLL_INTERVAL", "5"))
 DAILY_REPORT_HOUR = int(os.environ.get("DAILY_REPORT_HOUR", "23"))
 COOLDOWN_MINUTES  = int(os.environ.get("COOLDOWN_MINUTES", "30"))
 
-# Lista de estrategias activas
 STRATEGIES = [
     {
         "symbol":             XRP_SYMBOL,
@@ -67,9 +66,6 @@ STRATEGIES = [
         "hour_start":         SOL_HS,
         "hour_end":           SOL_HE,
     },
-    # Añadir más estrategias aquí:
-    # from estrategias.btc import ...
-    # { "symbol": BTC_SYMBOL, ... },
 ]
 
 KUCOIN_BASE = "https://api.kucoin.com"
@@ -80,8 +76,8 @@ log = logging.getLogger(__name__)
 # ============================================================
 # ESTADO
 # ============================================================
-last_signal_time = {}  # symbol -> datetime
-pending_signals  = []  # lista de operaciones abiertas
+last_signal_time = {}
+pending_signals  = []
 
 daily_stats  = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
 weekly_stats = {"total": 0, "win": 0, "loss": 0, "pnl": 0.0, "tp": 0, "sl": 0, "time": 0}
@@ -140,37 +136,24 @@ def get_current_price(symbol: str):
         log.error(f"KuCoin price exception {symbol}: {e}")
         return None
 
-def get_orderbook_pressure(symbol: str):
-    try:
-        url = f"{KUCOIN_BASE}/api/v1/market/orderbook/level2_20"
-        r = requests.get(url, params={"symbol": symbol}, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("code") == "200000":
-                bids = data["data"]["bids"]
-                asks = data["data"]["asks"]
-                bid_vol = sum(float(b[1]) for b in bids)
-                ask_vol = sum(float(a[1]) for a in asks)
-                total = bid_vol + ask_vol
-                if total == 0:
-                    return 0.5, 0.5
-                return bid_vol / total, ask_vol / total
-        return 0.5, 0.5
-    except Exception as e:
-        log.error(f"KuCoin orderbook exception {symbol}: {e}")
-        return 0.5, 0.5
-
 def parse_klines(klines: list):
+    """
+    KuCoin formato: [time, open, close, high, low, volume, turnover]
+    Viene en orden DESCENDENTE — invertimos para orden cronológico.
+    """
     result = []
     for k in reversed(klines):
         result.append({
+            "open":   float(k[1]),
             "close":  float(k[2]),
+            "high":   float(k[3]),
+            "low":    float(k[4]),
             "volume": float(k[5]),
         })
     return result
 
 # ============================================================
-# RSI
+# RSI — igual que TradingView ta.rsi()
 # ============================================================
 def calculate_rsi(klines: list, period: int) -> float:
     if len(klines) < period + 1:
@@ -189,6 +172,31 @@ def calculate_rsi(klines: list, period: int) -> float:
     return round(100 - (100 / (1 + rs)), 2)
 
 # ============================================================
+# DOMINANCIA — igual que TradingView (cuerpo de vela)
+# body_ratio = abs(close - open) / (high - low) * 100
+# ============================================================
+def calculate_dominance(candle: dict):
+    """
+    Misma lógica que Pine Script:
+    candle_range = high - low
+    body_ratio = abs(close - open) / candle_range * 100
+    bull = close > open and body_ratio >= dominance_pct
+    bear = close < open and body_ratio >= dominance_pct
+    """
+    candle_range = candle["high"] - candle["low"]
+    if candle_range == 0:
+        return None, 0.0
+    body = abs(candle["close"] - candle["open"])
+    body_ratio = body / candle_range * 100
+
+    if candle["close"] > candle["open"]:
+        direction = "LONG"
+    else:
+        direction = "SHORT"
+
+    return direction, round(body_ratio, 1)
+
+# ============================================================
 # HORARIO
 # ============================================================
 def is_trading_hours(hour_start: int, hour_end: int) -> bool:
@@ -205,7 +213,7 @@ def is_in_cooldown(symbol: str) -> bool:
     return elapsed < COOLDOWN_MINUTES * 60
 
 # ============================================================
-# LÓGICA DE DETECCIÓN
+# LÓGICA DE DETECCIÓN — igual que TradingView
 # ============================================================
 def check_strategy(strat: dict):
     symbol = strat["symbol"]
@@ -225,6 +233,7 @@ def check_strategy(strat: dict):
     current = klines[-1]
     history = klines[:-1]
 
+    # Volumen anómalo — igual que TradingView ta.sma(volume, ma_period)
     avg_volume = sum(k["volume"] for k in history[-strat["ma_period"]:]) / strat["ma_period"]
     if avg_volume == 0:
         return None
@@ -233,17 +242,15 @@ def check_strategy(strat: dict):
     if vol_ratio < strat["volume_multiplier"]:
         return None
 
-    buy_ratio, sell_ratio = get_orderbook_pressure(symbol)
-
-    if buy_ratio >= strat["dominance_threshold"]:
-        direction = "LONG"
-        dominance_pct = round(buy_ratio * 100, 1)
-    elif sell_ratio >= strat["dominance_threshold"]:
-        direction = "SHORT"
-        dominance_pct = round(sell_ratio * 100, 1)
-    else:
+    # Dominancia por cuerpo de vela — igual que TradingView
+    direction, body_ratio = calculate_dominance(current)
+    if direction is None:
         return None
 
+    if body_ratio < strat["dominance_threshold"]:
+        return None
+
+    # RSI — igual que TradingView ta.rsi()
     rsi = calculate_rsi(klines, period=strat["rsi_period"])
 
     if direction == "LONG" and rsi >= strat["rsi_long_max"]:
@@ -258,7 +265,7 @@ def check_strategy(strat: dict):
         "direction":     direction,
         "price":         current["close"],
         "vol_ratio":     round(vol_ratio, 2),
-        "dominance_pct": dominance_pct,
+        "dominance_pct": body_ratio,
         "rsi":           rsi,
         "strat":         strat,
     }
@@ -294,14 +301,8 @@ def format_resolution(signal: dict, close_price: float, close_reason: str) -> st
     result_emoji = "✅" if pnl_pct > 0 else "❌"
     result_label = "GANADA" if pnl_pct > 0 else "PERDIDA"
     sign = "+" if pnl_eur >= 0 else ""
-
-    reason_labels = {
-        "TP":    "🎯 Take Profit",
-        "SL":    "🛑 Stop Loss",
-        "TIME":  "⏱️ Tiempo máximo",
-    }
+    reason_labels = {"TP": "🎯 Take Profit", "SL": "🛑 Stop Loss", "TIME": "⏱️ Tiempo máximo"}
     reason_str = reason_labels.get(close_reason, close_reason)
-
     return (
         f"{result_emoji} <b>CIERRE — {symbol_name} {signal['direction']} — {result_label}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -345,7 +346,6 @@ def resolve_pending_signals():
         elapsed = (now - signal["entry_time"]).total_seconds()
         strat = signal["strat"]
 
-        # Obtener precio actual
         close_price = get_current_price(signal["symbol"])
         if close_price is None:
             continue
@@ -355,14 +355,10 @@ def resolve_pending_signals():
         pnl_pct = pct_change if signal["direction"] == "LONG" else -pct_change
 
         close_reason = None
-
-        # Check Take Profit
         if pnl_pct >= strat["take_profit_pct"]:
             close_reason = "TP"
-        # Check Stop Loss
         elif pnl_pct <= -strat["stop_loss_pct"]:
             close_reason = "SL"
-        # Check tiempo máximo
         elif elapsed >= strat["max_minutes"] * 60:
             close_reason = "TIME"
 
@@ -372,7 +368,6 @@ def resolve_pending_signals():
         signal["resolved"] = True
         pnl_eur = round(pnl_pct / 100, 4)
 
-        # Actualizar estadísticas
         for stats in [daily_stats, weekly_stats]:
             stats["total"] += 1
             stats["pnl"] = round(stats["pnl"] + pnl_eur, 4)
@@ -442,6 +437,7 @@ def main():
         f"🚀 <b>CryptoSignalBot activado</b>\n"
         f"📊 Estrategias activas: <b>{', '.join(symbols)}</b>\n"
         f"⏱️ Consulta cada {POLL_INTERVAL}s | Cooldown: {COOLDOWN_MINUTES}min\n"
+        f"📐 Lógica: cuerpo de vela (= TradingView)\n"
         f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
     )
 
