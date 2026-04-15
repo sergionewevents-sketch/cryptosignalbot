@@ -9,7 +9,7 @@ primary_region = "iad"
   TELEGRAM_CHAT_ID  = "364177709"
   POLL_INTERVAL     = "5"
   COOLDOWN_MINUTES  = "30"
-  DAILY_REPORT_HOUR = "23"
+  DAILY_REPORT_HOUR = "20"
 
 [[vm]]
   memory = "256mb"
