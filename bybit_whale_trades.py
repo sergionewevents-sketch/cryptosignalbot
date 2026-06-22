@@ -59,7 +59,7 @@ MIN_USD = _envf("MIN_USD", 1000000)
 
 # Qué mercados vigilar (separados por comas). Símbolos de Bybit.
 SYMBOLS = [s.strip().upper() for s in
-           os.environ.get("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BTCUSDC,ETHUSDC,SOLUSDC,UNIUSDT,UNIUSDC,HYPEUSDT").split(",") if s.strip()]
+           os.environ.get("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,UNIUSDT,HYPEUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ZECUSDT,LINKUSDT,ADAUSDT,ONDOUSDT").split(",") if s.strip()]
 
 # "linear" = perpetuos USDT (recomendado, más volumen de ballenas y hasta 1000 trades
 # por consulta). "spot" = contado (máximo 60 por consulta).
